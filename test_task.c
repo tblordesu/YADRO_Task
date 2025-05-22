@@ -1,195 +1,210 @@
-#include <stdio.h>              // Стандартный ввод/вывод
-#include <stdlib.h>             // Для функций atoi, atof, malloc
-#include <string.h>             // Для работы со строками
-#include <ctype.h>              // Для проверки символов
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
 
-#define MAX_ROWS 100            // Максимальное количество строк в таблице
-#define MAX_COLS 26             // Максимальное количество столбцов
-#define MAX_CELL_LEN 256        // Максимальная длина содержимого одной ячейки
-#define MAX_LINE_LEN 1024
+// Максимальное количество строк, столбцов и длина содержимого ячейки
+#define MAX_ROWS 1024
+#define MAX_COLS 64
+#define MAX_CELL_LEN 128
 
-// Хранение заголовков столбцов
+// Заголовки столбцов
 char headers[MAX_COLS][MAX_CELL_LEN];
-// Сырые строки таблицы
-char table[MAX_ROWS][MAX_COLS][MAX_CELL_LEN];
-// Числовые значения после вычисления
-double values[MAX_ROWS][MAX_COLS];
-// Отметка вычисления ячейки
-int evaluated[MAX_ROWS][MAX_COLS];
-int evaluating[MAX_ROWS][MAX_COLS]; // цикл
 
-int row_indices[MAX_ROWS]; // csv_row_number -> internal index
-int row_numbers[MAX_ROWS]; // internal index -> csv_row_number
-int row_count = 0, col_count = 0; // Счётчики строк и столбцов
+// Таблица: каждая ячейка содержит строку (либо число, либо формулу)
+char *cells[MAX_ROWS][MAX_COLS];
 
-// Получение индекса столбца по имени
-int get_col_index(const char *col_name) 
-{
-    for (int i = 0; i < col_count; ++i) 
-    {
-        if (strcmp(headers[i], col_name) == 0) 
-        {
-            return i;
-        }
-    }
-    return -1; // Не найдено
+// Номера строк (например, 1, 2, 30)
+int row_nums[MAX_ROWS];
+
+// Общее количество строк и столбцов
+int n_rows = 0, n_cols = 0;
+
+// Кэш значений после вычисления
+int values[MAX_ROWS][MAX_COLS];
+// Флаги, чтобы не вычислять ячейки повторно
+char computed[MAX_ROWS][MAX_COLS]; // 0 — не вычислено, 1 — уже вычислено
+
+// Удаляет пробелы в начале и в конце строки
+char *trim(char *s) {
+    while (isspace((unsigned char)*s)) s++;
+    if (*s == 0) return s;
+    char *end = s + strlen(s) - 1;
+    while (end > s && isspace((unsigned char)*end)) *end-- = 0;
+    return s;
 }
 
-int get_row_index(int csv_row_number) {
-    for (int i = 0; i < row_count; ++i) {
-        if (row_numbers[i] == csv_row_number) return i;
-    }
+// Ищем индекс столбца по названию (например, "A")
+int get_col_index(const char *name) {
+    for (int i = 0; i < n_cols; ++i)
+        if (strcmp(headers[i], name) == 0)
+            return i;
     return -1;
 }
 
-// парс адреса ячейки
-int parse_cell_address(const char *expr, int *col, int *row) 
-{
-    char col_name[MAX_CELL_LEN];
-    int i = 0;
-    while (isalpha(expr[i]) && i < MAX_CELL_LEN - 1) 
-    {
-        col_name[i] = expr[i];
-        i++;
+// Ищем индекс строки по номеру (например, 1, 2, 30)
+int get_row_index(int row_num) {
+    for (int i = 0; i < n_rows; ++i)
+        if (row_nums[i] == row_num)
+            return i;
+    return -1;
+}
+
+// Декларация функции (определена ниже)
+int eval_cell(int row, int col, int *result);
+
+// Вычисление выражения вида =ARG1 OP ARG2
+int eval_expr(char *expr, int *out) {
+    char arg1[MAX_CELL_LEN], arg2[MAX_CELL_LEN];
+    char op;
+
+    if (expr[0] != '=') return -1;
+
+    // Создаем копию выражения, чтобы не портить оригинал
+    char tmp[MAX_CELL_LEN];
+    strncpy(tmp, expr + 1, MAX_CELL_LEN - 1);
+    tmp[MAX_CELL_LEN - 1] = '\0';
+
+    // Ищем оператор (+, -, * или /)
+    char *op_ptr = strpbrk(tmp, "+-*/");
+    if (!op_ptr) return -1;
+
+    op = *op_ptr;
+    *op_ptr = '\0';
+
+    // Разделяем аргументы
+    strncpy(arg1, tmp, MAX_CELL_LEN - 1);
+    arg1[MAX_CELL_LEN - 1] = '\0';
+
+    strncpy(arg2, op_ptr + 1, MAX_CELL_LEN - 1);
+    arg2[MAX_CELL_LEN - 1] = '\0';
+
+    int val1, val2;
+
+    // Обрабатываем ARG1
+    if (isalpha(arg1[0])) {
+        char colname[MAX_CELL_LEN];
+        int rownum;
+        // Разбиваем на имя столбца и номер строки
+        if (sscanf(arg1, "%[A-Za-z]%d", colname, &rownum) != 2) return -1;
+        int c = get_col_index(colname);
+        int r = get_row_index(rownum);
+        if (c == -1 || r == -1 || eval_cell(r, c, &val1) != 0) return -1;
+    } else {
+        val1 = atoi(arg1); // Просто число
     }
-    col_name[i] = '\0';
-    *col = get_col_index(col_name);
-    if (*col == -1) return -1;
-    int csv_row = atoi(expr + i);
-    *row = get_row_index(csv_row);
-    if (*row == -1) return -1;
+
+    // Обрабатываем ARG2
+    if (isalpha(arg2[0])) {
+        char colname[MAX_CELL_LEN];
+        int rownum;
+        if (sscanf(arg2, "%[A-Za-z]%d", colname, &rownum) != 2) return -1;
+        int c = get_col_index(colname);
+        int r = get_row_index(rownum);
+        if (c == -1 || r == -1 || eval_cell(r, c, &val2) != 0) return -1;
+    } else {
+        val2 = atoi(arg2);
+    }
+
+    // Вычисляем значение по оператору
+    switch (op) {
+        case '+': *out = val1 + val2; break;
+        case '-': *out = val1 - val2; break;
+        case '*': *out = val1 * val2; break;
+        case '/':
+            if (val2 == 0) return -1; // Деление на 0 — ошибка
+            *out = val1 / val2; break;
+        default: return -1;
+    }
     return 0;
 }
 
-// Предварительное объявление, чтобы использовать в eval_expr
-double eval_cell(int row, int col);
-
-char *trim_whitespace(char *str) {
-    while (isspace(*str)) str++;
-    char *end = str + strlen(str) - 1;
-    while (end > str && isspace(*end)) *end-- = '\0';
-    return str;
-}
-
-char *find_first_operator(char *expr) {
-    while (*expr) {
-        if (strchr("+-*/", *expr)) return expr;
-        expr++;
+// Вычисляет значение конкретной ячейки
+int eval_cell(int row, int col, int *result) {
+    if (computed[row][col]) { // если уже считали, просто возвращаем
+        *result = values[row][col];
+        return 0;
     }
-    return NULL;
-}
 
-// Вычисление выражения из строки
-double eval_expr(char *expr) 
-{
-    expr = trim_whitespace(expr);
-    char *op_pos = find_first_operator(expr);
-    // Поиск первого оператора
-    if (op_pos) {
-        char left[MAX_CELL_LEN], right[MAX_CELL_LEN];
-        strncpy(left, expr, op_pos - expr);
-        left[op_pos - expr] = '\0';
-        strcpy(right, op_pos + 1);
+    char *content = cells[row][col];
+    if (!content || !*content) return -1;
 
-        int col1, row1, col2, row2;
-        if (parse_cell_address(trim_whitespace(left), &col1, &row1) != 0 ||
-            parse_cell_address(trim_whitespace(right), &col2, &row2) != 0) return 0;
-
-        double val1 = eval_cell(row1, col1);
-        double val2 = eval_cell(row2, col2);
-
-        switch (*op_pos) 
-        {
-            case '+': return val1 + val2;
-            case '-': return val1 - val2;
-            case '*': return val1 * val2;
-            case '/': return val2 != 0 ? val1 / val2 : 0; // Защита от деления на 0
-        }
-    } else 
-    {
-        return atof(expr); // число
-    }
-    return 0; // Ошибка по умолчанию
-}
-
-// Вычисление значения конкретной ячейки
-double eval_cell(int row, int col) {
-    if (evaluated[row][col]) return values[row][col];
-    if (evaluating[row][col]) {
-        fprintf(stderr, "Cyclic dependency at cell (%d, %s)\n", row_numbers[row], headers[col]);
-        exit(1);
-    }
-    evaluating[row][col] = 1;
-    char *content = table[row][col];
     if (content[0] == '=') {
-        values[row][col] = eval_expr(content + 1);
-    } else {
-        values[row][col] = atof(content);
-    }
-    evaluated[row][col] = 1;
-    evaluating[row][col] = 0;
-    return values[row][col];
-}
-
-// Печать таблицы с вычисленными значениями в CSV
-void print_table() 
-{
-    printf(",");
-    for (int i = 0; i < col_count; i++)
-    {
-        printf("%s%s", headers[i], i < col_count - 1 ? "," : "\n");
-    }
-    for (int i = 0; i < row_count; i++) 
-    {
-        printf("%d,", i);
-        for (int j = 0; j < col_count; j++) 
-        {
-            printf("%.6g%s", eval_cell(i, j), j < col_count - 1 ? "," : "\n");
+        int val;
+        if (eval_expr(content, &val) == 0) {
+            values[row][col] = val;
+            computed[row][col] = 1;
+            *result = val;
+            return 0;
+        } else {
+            return -1;
         }
+    } else {
+        int val = atoi(content); // просто число
+        values[row][col] = val;
+        computed[row][col] = 1;
+        *result = val;
+        return 0;
     }
 }
 
-int main(int argc, char *argv[]) 
-{
-    if (argc < 2) 
-    {
+// Печатает таблицу в stdout
+void print_table() {
+    printf(","); // верхняя левая пустая ячейка
+    for (int i = 0; i < n_cols; ++i)
+        printf("%s%s", headers[i], i == n_cols - 1 ? "\n" : ",");
+
+    for (int i = 0; i < n_rows; ++i) {
+        printf("%d", row_nums[i]);
+        for (int j = 0; j < n_cols; ++j) {
+            int val;
+            if (eval_cell(i, j, &val) == 0)
+                printf(",%d", val);
+            else
+                printf(",ERR");
+        }
+        printf("\n");
+    }
+}
+
+// Основная функция — точка входа
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
         fprintf(stderr, "Usage: %s file.csv\n", argv[0]);
         return 1;
     }
 
-    FILE *f = fopen(argv[1], "r");
-    if (!f) 
-    {
-        perror("Failed to open file");
+    FILE *fp = fopen(argv[1], "r");
+    if (!fp) {
+        perror("fopen");
         return 1;
     }
 
-    char line[MAX_LINE_LEN];
-    fgets(line, sizeof(line), f); // Считываем строку заголовка
+    char line[1024];
 
-    char *token = strtok(line, ",\n"); // Пропускаем пустую ячейку
-    while ((token = strtok(NULL, ",\n")) != NULL && col_count < MAX_COLS) 
-    {
-        strcpy(headers[col_count++], token); // Сохраняем имена столбцов
-    }
-
-    // Чтение строк таблицы
-     while (fgets(line, sizeof(line), f)) {
-        if (row_count >= MAX_ROWS) break;
-        token = strtok(line, ",\n");
-        if (!token) continue;
-        int csv_row_number = atoi(token);
-        row_numbers[row_count] = csv_row_number;
-        row_indices[csv_row_number] = row_count;
-
-        int col = 0;
-        while ((token = strtok(NULL, ",\n")) != NULL && col < col_count) {
-            strcpy(table[row_count][col++], token);
+    // Чтение первой строки — заголовков
+    if (fgets(line, sizeof(line), fp)) {
+        char *tok = strtok(line, ",\r\n");
+        while ((tok = strtok(NULL, ",\r\n"))) {
+            strncpy(headers[n_cols++], trim(tok), MAX_CELL_LEN);
         }
-        row_count++;
     }
-    fclose(f);
 
-    print_table(); // Печать результата
+    // Чтение остальных строк (данные)
+    while (fgets(line, sizeof(line), fp)) {
+        int col = 0;
+        char *tok = strtok(line, ",\r\n");
+        if (!tok) continue;
+        row_nums[n_rows] = atoi(tok); // номер строки
+
+        while ((tok = strtok(NULL, ",\r\n")) && col < MAX_COLS) {
+            cells[n_rows][col] = strdup(trim(tok)); // сохраняем строку
+            col++;
+        }
+        n_rows++;
+    }
+
+    fclose(fp);
+    print_table(); // печатаем результат
     return 0;
 }

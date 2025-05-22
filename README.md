@@ -6,6 +6,6 @@ CSV-файл содержит:
 
 Требуется gcc/mingw для Windows и gcc для Linux и MacOS
 
-Команда сборки gcc -o csveval test_task.c
+Команда сборки gcc -o csvreader test_task.c
 
-Запуск ./csveval file.csv
+Запуск ./csvreader exasmple.csv
